@@ -40,11 +40,11 @@ router
 
 
 // Example middleware in Node.js (Express)
-const verifyAdmin = (req, res, next) => {
+const isAdmin = (req, res, next) => {
     if (req.user && req.user.role === 'admin') {
-        next();
+        return true;
     } else {
-        res.status(403).json({ message: 'Access denied' });
+        return false;
     }
 };
 
@@ -78,12 +78,19 @@ const updateUserPoints = async (req, res) => {
 
         // Save the updated user
         await user.save();
+        if (isAdmin) {
+            res.status(200).json({
+                success: true,
+                message: 'User points updated successfully',
+                user,
+            });
+        } else {
+            res.status(404).json({
+                success: false,
+                message: 'User not found',
+            });
+        }
 
-        res.status(200).json({
-            success: true,
-            message: 'User points updated successfully',
-            user,
-        });
     } catch (error) {
         res.status(500).json({
             success: false,
@@ -101,6 +108,34 @@ const getUsersByPoints = async (req, res) => {
         // Fetch all users sorted by points in descending order
         const users = await User.find({ 'role': 'employee' }).sort({ points: -1 });
 
+        if (isAdmin) {
+            res.status(200).json({
+                success: true,
+                users,
+            });
+        } else {
+            res.status(404).json({
+                success: false,
+                message: 'User not found',
+            });
+        }
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: error.message,
+        });
+    }
+};
+
+router.get('/admin/user/points', isAuthenticatedUser, authorizeRoles('admin'), getUsersByPoints);
+
+
+const getUsersByPointsEMP = async (req, res) => {
+    try {
+        // Fetch all users with role 'employee', sorted by points in descending order, and project only name and points, excluding _id
+        const users = await User.find({ role: 'employee' }).sort({ points: -1 }).select('name points -_id');
+
         res.status(200).json({
             success: true,
             users,
@@ -113,10 +148,9 @@ const getUsersByPoints = async (req, res) => {
     }
 };
 
-router.get('/admin/user/points', isAuthenticatedUser, authorizeRoles('admin'), getUsersByPoints);
+router.get('/employee/user/points', isAuthenticatedUser, authorizeRoles('employee'), getUsersByPointsEMP);
 
 
-router.get('/employee/user/points', isAuthenticatedUser, authorizeRoles('employee'), getUsersByPoints);
 
 router.route('/tasks').post(isAuthenticatedUser, authorizeRoles("admin"), async (req, res) => {
 
@@ -140,8 +174,12 @@ router.route('/tasks/:userId').get(isAuthenticatedUser, authorizeRoles("employee
         // Find tasks assigned to the user
         const tasks = await Task.find({ 'users.user': req.params.userId });
         // Check if tasks exist
-        if (tasks.length > 0) {
-            res.status(200).json({ success: true, tasks: tasks });
+        if (req.user.id === userId) {
+            if (tasks.length > 0) {
+                res.status(200).json({ success: true, tasks: tasks });
+            } else {
+                res.status(404).json({ success: false, message: 'No tasks found for the user' });
+            }
         } else {
             res.status(404).json({ success: false, message: 'No tasks found for the user' });
         }
@@ -153,15 +191,23 @@ router.route('/tasks/:userId').get(isAuthenticatedUser, authorizeRoles("employee
 
 router.post('/tasks/:id/status', isAuthenticatedUser, async (req, res) => {
     const { value, comment } = req.body;
-    const userId = req.user._id;
+    const userId = req.user.id;
     const userName = req.user.name;
 
     try {
+        // Find the task by ID and populate the users field
         const task = await Task.findById(req.params.id).populate('users.user');
         if (!task) {
             return res.status(404).json({ success: false, message: 'Task not found' });
         }
 
+        // Check if the logged-in user is part of the task
+        const isUserIncluded = task.users.some(userObj => userObj.user._id.toString() === userId);
+        if (!isUserIncluded) {
+            return res.status(403).json({ success: false, message: 'User not authorized to update this task' });
+        }
+
+        // Create a new status entry
         const statusEntry = {
             value,
             comment,
@@ -169,6 +215,7 @@ router.post('/tasks/:id/status', isAuthenticatedUser, async (req, res) => {
             user: userId,
         };
 
+        // Add the status entry to the task
         task.status.push(statusEntry);
 
         // If value is 100, increase the points of all users associated with the task
@@ -176,12 +223,13 @@ router.post('/tasks/:id/status', isAuthenticatedUser, async (req, res) => {
             for (const userObj of task.users) {
                 const user = await User.findById(userObj.user._id);
                 if (user) {
-                    user.points += task.value; // Assuming you want to increase points by 10
+                    user.points += task.value; // Assuming task.value contains the points to be added
                     await user.save();
                 }
             }
         }
 
+        // Save the task with the new status entry
         await task.save();
 
         res.status(200).json({ success: true, task });
@@ -189,6 +237,7 @@ router.post('/tasks/:id/status', isAuthenticatedUser, async (req, res) => {
         res.status(500).json({ success: false, message: error.message });
     }
 });
+
 
 
 // Admin can delete any status
@@ -307,34 +356,42 @@ router.route('/tasks/:taskId/status/:statusId').delete(isAuthenticatedUser, asyn
 router.route('/tasks/:id').put(isAuthenticatedUser, authorizeRoles("employee"), async (req, res) => {
     const userId = req.params.userId;
 
+    if (req.user.id === userId) {
+        await Task.findByIdAndUpdate(req.params.id, req.body, {
+            new: true,
+            runValidators: true,
+            useFindAndModify: false,
+        });
 
-    // Find tasks assigned to the user
-    await Task.findByIdAndUpdate(req.params.id, req.body, {
-        new: true,
-        runValidators: true,
-        useFindAndModify: false,
-    });
+        res.status(200).json({
+            success: true,
+            message: "Task Updated Successfully"
+        });
+    } else {
+        res.status(404).json({ success: false, message: 'No tasks found for the user' });
+    }
 
-    res.status(200).json({
-        success: true,
-        message: "Task Updated Successfully"
-    });
 });
 
 router.route('/admin/tasks/:id').put(isAuthenticatedUser, authorizeRoles("admin"), async (req, res) => {
 
 
     // Find tasks assigned to the user
-    await Task.findByIdAndUpdate(req.params.id, req.body, {
-        new: true,
-        runValidators: true,
-        useFindAndModify: false,
-    });
+    if (isAdmin) {
+        await Task.findByIdAndUpdate(req.params.id, req.body, {
+            new: true,
+            runValidators: true,
+            useFindAndModify: false,
+        });
 
-    res.status(200).json({
-        success: true,
-        message: "Task Updated Successfully"
-    });
+        res.status(200).json({
+            success: true,
+            message: "Task Updated Successfully"
+        });
+    } else {
+        res.status(404).json({ success: false, message: 'Better luck next time.' });
+    }
+
 });
 
 
@@ -398,12 +455,17 @@ router.put('/tasks/:taskId/status/:statusId', isAuthenticatedUser, async (req, r
 
 router.route('/admin/tasks/:id').get(isAuthenticatedUser, authorizeRoles("admin"), async (req, res) => {
 
-    const task = await Task.findById(req.params.id);
+    if (isAdmin) {
+        const task = await Task.findById(req.params.id);
 
-    res.status(200).json({
-        success: true,
-        task,
-    });
+        res.status(200).json({
+            success: true,
+            task,
+        });
+    } else {
+        res.status(500).json({ success: false, message: 'Better Luck next time' });
+    }
+
 });
 
 
@@ -418,12 +480,17 @@ router.route('/admin/tasks/:id').delete(isAuthenticatedUser, authorizeRoles("adm
             });
         }
 
-        await task.deleteOne();  // Use deleteOne method to delete the task
+        if (isAdmin) {
+            await task.deleteOne();  // Use deleteOne method to delete the task
 
-        res.status(200).json({
-            success: true,
-            message: "Task deleted"
-        });
+            res.status(200).json({
+                success: true,
+                message: "Task deleted"
+            });
+        } else {
+            res.status(500).json({ success: false, message: 'Better Luck next time' });
+        }
+
     } catch (error) {
         res.status(500).json({
             success: false,
