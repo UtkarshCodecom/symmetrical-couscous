@@ -24,7 +24,7 @@ router.route("/login").post(loginUser);
 
 router.route("/logout").get(logout);
 
-router.route('/getalltask').get(getAllTask, authorizeRoles("admin"));
+router.route('/getalltask').get(authorizeRoles("admin"), getAllTask);
 
 router.route("/me").get(isAuthenticatedUser, getUserDetails);
 
